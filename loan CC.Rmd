@@ -1,0 +1,270 @@
+---
+title: "DCD Project"
+author: "Ambiya Sang Aji"
+date: "July 8, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(randomForest)
+library(data.table)
+library(DMwR)
+library(xgboost)
+library(keras)
+```
+
+#Credit Card Default Prediction Based on Historical Payment
+
+##1. Read Data and Analyze
+
+Read Data
+
+```{r}
+ccdef <- fread("dataset/UCI_Credit_Card.csv", na.strings = c("", "NA"))
+```
+
+Melakukan pengecekan variabel dataset
+
+```{r}
+str(ccdef)
+```
+Pengecekan nilai N/A di dataset
+
+```{r}
+sum(is.na(ccdef))
+```
+Tidak ada data N/A
+
+
+Pengecekan nilai near zero
+```{r}
+nearZeroVar(ccdef)
+```
+
+tidak ada nilai near zero
+
+Cek perbandingan label target
+
+```{r}
+prop.table(table(ccdef$default.payment.next.month))
+```
+
+Label target tidak seimbang, lebih besar label "no"
+
+##2. Preprocess Data
+
+Beberapa variabel seharusnya berbentuk tipe data factor, akan diubah ke dalam tipe data factor.
+
+```{r}
+ccdef$PAY_0 <- as.factor(ccdef$PAY_0)
+ccdef$PAY_2 <- as.factor(ccdef$PAY_2)
+ccdef$PAY_3 <- as.factor(ccdef$PAY_3)
+ccdef$PAY_4 <- as.factor(ccdef$PAY_4)
+ccdef$PAY_5 <- as.factor(ccdef$PAY_5)
+ccdef$PAY_6 <- as.factor(ccdef$PAY_6)
+ccdef$EDUCATION <- as.factor(ccdef$EDUCATION)
+ccdef$MARRIAGE <- as.factor(ccdef$MARRIAGE)
+ccdef$default.payment.next.month <- as.factor(ccdef$default.payment.next.month)
+ccdef$SEX <- as.factor(ccdef$SEX)
+```
+
+Remove variabel ID, karena tidak berguna
+
+```{r}
+ccdef <- ccdef[,-1]
+```
+
+Perubahan class dari data factor
+
+```{r}
+levels(ccdef$EDUCATION) <- factor(c("others1","graduate","university","high school","others2","others3","others4"))
+levels(ccdef$MARRIAGE) <- factor(c("married","single","divorce","others"))
+levels(ccdef$SEX) <- factor(c("male","female"))
+levels(ccdef$default.payment.next.month) <- factor(c("no","yes"))
+```
+
+Merubah data factor menjadi dummy variabel
+
+```{r}
+dummy <- dummyVars("~ EDUCATION+MARRIAGE+SEX+PAY_0+PAY_2+PAY_3+PAY_4+PAY_5+PAY_6", data = ccdef)
+dummy <- data.frame(predict(dummy, newdata = ccdef))
+ccdef <- cbind(ccdef,dummy)
+ccdef <- ccdef[,-c(2:4,6:11)]
+rm(dummy)
+```
+
+Splitting data training dan test
+
+```{r}
+set.seed(100)
+id <- sample(nrow(ccdef),(nrow(ccdef)*0.70))
+cc_train <- ccdef[id,]
+cc_test <- ccdef[-id,]
+rm(id)
+```
+
+Scaling data
+
+```{r}
+cc_train2y <- cc_train[,15]
+cc_train2x <- scale(cc_train[,-15])
+```
+
+#3. Modelling
+
+XGBoost
+```{r}
+search_grid <- expand.grid(nrounds=200, max_depth=c(6),eta=0.01,subsample=c(0.5), colsample_bytree=c(0.5), gamma=c(10),min_child_weight=c(6))
+
+trctrl <- trainControl(method = "cv", number = 5,  classProbs = T,summaryFunction = twoClassSummary, sampling = "down")
+set.seed(100)
+xgb <- train(x = cc_train2x, 
+                   y = cc_train2y$default.payment.next.month,
+                   method = "xgbTree",
+                   trControl=trctrl,
+                   tuneGrid = search_grid,
+                   metric = "Spec")
+```
+
+setelah dilakukan training, ditemukan parameter optimum adalah nrounds = 200, max_depth = 6, eta = 0.01, gamma = 10, colsample_bytree = 0.5, min_child_weight = 6 and subsample = 0.5, umodel telah di save dan untuk kebutuhan publish document, akan dilakukan load model yang sudah di save sebelumnya 
+
+```{r}
+xgb <- readRDS(file = "model/xgb.rds")
+```
+Decision Tree 
+```{r}
+search_grid <- expand.grid(mincriterion=0.17)
+
+trctrl <- trainControl(method = "cv", number = 5,  classProbs = T,summaryFunction = twoClassSummary, sampling = "down")
+set.seed(100)
+dct <- train(x = cc_train[,-15], 
+                   y = cc_train$default.payment.next.month,
+                   method = "ctree",
+                   trControl=trctrl,
+                   tuneGrid = search_grid,
+                   metric = "Spec")
+```
+
+setelah dilakukan training, ditemukan parameter optimum adalah mincriterion=0.17, model telah di save dan untuk kebutuhan publish document, akan dilakukan load model yang sudah di save sebelumnya 
+
+```{r}
+dct <- readRDS(file = "model/dct.rds")
+```
+
+```{r}
+cctrain2x <- cc_train2x[,-c(49,64,71,81)]
+```
+
+```{r}
+cctrain2x <- as.data.frame(cctrain2x)
+cctrain2x <- cbind(cctrain2x,cc_train$default.payment.next.month)
+cctrain2x <- downSample(cctrain2x[,-88],cctrain2x[,88], yname = "default" )
+```
+
+```{r}
+set.seed(100)
+model <-  keras_model_sequential()
+model %>%
+  layer_dense(units = 128*8, activation =  "relu", input_shape =  c(87)) %>% 
+  layer_dropout(rate = 0.3) %>% 
+  layer_dense(units = 128*4, activation =  "relu") %>% 
+  layer_dropout(rate = 0.2) %>% 
+  layer_dense(units = 128*2, activation =  "relu") %>% 
+  layer_dropout(rate = 0.1) %>% 
+  layer_dense(units = 128, activation =  "relu") %>% 
+  layer_dropout(rate = 0.05) %>% 
+  layer_dense(units = 64, activation =  "relu") %>% 
+  layer_dense(units = 2, activation = "sigmoid")
+```
+
+Set Model Evaluasi.
+```{r}
+set.seed(100)
+model %>%
+  compile(
+    loss = "categorical_crossentropy",
+    optimizer = optimizer_adam(),
+    metrics = c("accuracy")
+  )
+```
+
+```{r}
+dummy2 <- dummyVars("~default", data = cctrain2x)
+cctrain2y <- data.frame(predict(dummy2, newdata = cctrain2x))
+cctrain2x <- as.matrix(cctrain2x)
+cctrain2y <- as.matrix(cctrain2y)
+```
+
+
+Fitting Model ke Data Train
+```{r results='hide'}
+set.seed(100)
+history <- model %>% fit(      
+  cctrain2x[,-88],cctrain2y,
+  epochs = 30, batch_size = 100,
+  validation_split = 0.2
+)
+  
+```
+
+model berhasil dibentuk, untuk kebutuhan knitting, model telah di save dan untuk kebutuhan publish document, akan dilakukan load model yang sudah di save sebelumnya 
+
+```{r}
+model <- load_model_hdf5(filepath = "model/nn.hdf5")
+```
+
+
+#4. Testing
+Scaling Data test
+
+```{r}
+cctesty <- cc_test[,15]
+cctestx <- scale(cc_test[,-15])
+cctest2x <- cctestx[,-c(49,64,71,81)]
+```
+
+Test model Decision Tree
+
+```{r}
+cc_test$AGE <- as.integer(cc_test$AGE)
+dctpredict <- predict(dct$finalModel, cc_test[,-15], type = "prob")
+dctpredict <- unlist(dctpredict)
+dctpredict2 <- matrix(0L, nrow = (length(dctpredict)/2), ncol = 2) 
+for (i in 1:length(dctpredict)){
+  if (i %% 2 == 0){
+    dctpredict2[(i/2),2] <- dctpredict[i]
+  }
+  else if (i %% 2 != 0){
+  dctpredict2[(ceiling(i/2)),1] <- dctpredict[i]
+  }
+}
+dctpredict3 <-  ifelse(dctpredict2[,2]>0.445,1,0)
+dctpredict3 <- as.factor(dctpredict3)
+levels(dctpredict3) <- factor(c("no","yes"))
+confusionMatrix(dctpredict3,cc_test$default.payment.next.month,positive='yes')
+```
+
+
+Test Model xgbTree
+```{r}
+dctpredict <- predict(xgb, cctestx, type = "prob")
+dctpredict3 <-  ifelse(dctpredict[,2]>0.429,1,0)
+dctpredict3 <- as.factor(dctpredict3)
+levels(dctpredict3) <- factor(c("no","yes"))
+confusionMatrix(dctpredict3,cctesty$default.payment.next.month,positive='yes')
+```
+
+Test Model Neural Net
+
+```{r}
+predict <- model %>%  predict_proba(cctest2x)
+predict <- as.data.frame(predict)
+predict2 <- ifelse(predict[,2]>0.41,1,0)
+predict2 <- as.factor(predict2)
+levels(predict2) <- factor(c("no","yes"))
+confusionMatrix(predict2,cc_test$default.payment.next.month)
+```
+
+Model Terbaik dihasilkan oleh algoritma xgbtree dalam kasus ini
